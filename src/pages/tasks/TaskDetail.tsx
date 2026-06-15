@@ -20,7 +20,11 @@ import {
   List,
   Avatar,
   Timeline,
-  Popconfirm
+  Popconfirm,
+  Segmented,
+  Switch,
+  Slider,
+  Select
 } from 'antd';
 import {
   PlayCircleOutlined,
@@ -43,7 +47,10 @@ import {
   BellOutlined,
   SettingOutlined,
   ExperimentOutlined,
-  ApartmentOutlined
+  ApartmentOutlined,
+  BulbOutlined,
+  ThunderboltOutlined,
+  AppstoreOutlined
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import { useAppStore } from '@/store';
@@ -69,6 +76,9 @@ import dayjs from 'dayjs';
 import { exportToCSV, exportToJSON } from '@/utils';
 import { downloadReport } from '@/services/pdfService';
 import { exportFullData } from '@/services/exportService';
+import MixerSettler3D from '@/components/visualization/MixerSettler3D';
+import VolumeCloud3D from '@/components/visualization/VolumeCloud3D';
+import type { ColormapName, RenderMode, SliceAxis } from '@/components/visualization/VolumeCloud3D';
 
 /**
  * 模拟任务详情页面
@@ -81,30 +91,54 @@ const TaskDetail: React.FC = () => {
   
   // 从状态管理中获取任务数据
   const { 
-    getTaskById, 
     updateTaskStatus, 
     updateApproval,
     acknowledgeAlert,
     currentUser,
-    deleteTask
+    deleteTask,
+    setCurrentTask,
+    startSimulation,
+    pauseSimulation,
+    resumeSimulation,
+    cancelSimulation
   } = useAppStore();
   
+  // 直接从 store 选择当前任务，确保响应式更新
+  const task = useAppStore(state => 
+    id ? state.tasks.find(t => t.id === id) : undefined
+  );
+  
   // 状态管理
-  const [task, setTask] = useState<SimulationTask | undefined>(undefined);
   const [activeTab, setActiveTab] = useState<string>('overview');
   const [alertPanelVisible, setAlertPanelVisible] = useState<boolean>(false);
-  const [loading, setLoading] = useState<boolean>(false);
 
-  // 获取任务数据
+  // 3D可视化状态
+  const [viewMode, setViewMode] = useState<'geometry' | 'cloud' | 'combined'>('geometry');
+  const [showGrid, setShowGrid] = useState<boolean>(true);
+  const [showAxes, setShowAxes] = useState<boolean>(false);
+  const [autoRotate, setAutoRotate] = useState<boolean>(false);
+  const [cloudOpacity, setCloudOpacity] = useState<number>(0.6);
+  const [colormap, setColormap] = useState<ColormapName>('viridis');
+  const [renderMode, setRenderMode] = useState<RenderMode>('volume');
+  const [showSlice, setShowSlice] = useState<boolean>(false);
+  const [sliceAxis, setSliceAxis] = useState<SliceAxis>('z');
+  const [slicePosition, setSlicePosition] = useState<number>(0.5);
+
+  // 设置当前任务并检查任务是否存在
   useEffect(() => {
     if (id) {
-      const taskData = getTaskById(id);
-      setTask(taskData);
-      if (!taskData) {
-        message.error('未找到该任务');
-      }
+      setCurrentTask(id);
+    } else {
+      setCurrentTask(null);
     }
-  }, [id, getTaskById]);
+  }, [id, setCurrentTask]);
+
+  // 任务不存在时显示错误
+  useEffect(() => {
+    if (id && !task) {
+      message.error('未找到该任务');
+    }
+  }, [id, task]);
 
   // 定义7个状态流转步骤
   const statusSteps = useMemo(() => [
@@ -135,13 +169,17 @@ const TaskDetail: React.FC = () => {
   // 操作按钮处理函数
   const handleStart = () => {
     if (!task) return;
-    setLoading(true);
-    setTimeout(() => {
-      updateTaskStatus(task.id, SimulationStatus.MESHING, '用户手动启动模拟');
-      setTask(getTaskById(task.id));
+    
+    if (task.status === SimulationStatus.PAUSED) {
+      resumeSimulation(task.id);
+      message.success('模拟已继续');
+    } else if (task.status === SimulationStatus.ABNORMAL_ROLLBACK) {
+      startSimulation(task.id);
+      message.success('模拟已重试');
+    } else {
+      startSimulation(task.id);
       message.success('模拟已启动');
-      setLoading(false);
-    }, 500);
+    }
   };
 
   const handlePause = () => {
@@ -150,8 +188,7 @@ const TaskDetail: React.FC = () => {
       title: '确认暂停模拟',
       content: '暂停后可以随时继续，当前计算进度将被保存。',
       onOk: () => {
-        updateTaskStatus(task.id, SimulationStatus.PAUSED, '用户手动暂停');
-        setTask(getTaskById(task.id));
+        pauseSimulation(task.id);
         message.success('模拟已暂停');
       }
     });
@@ -166,7 +203,6 @@ const TaskDetail: React.FC = () => {
       okType: 'danger',
       onOk: () => {
         updateTaskStatus(task.id, SimulationStatus.ABNORMAL_ROLLBACK, '用户取消模拟');
-        setTask(getTaskById(task.id));
         message.success('模拟已取消');
       }
     });
@@ -239,7 +275,6 @@ const TaskDetail: React.FC = () => {
       content: approved ? '确认通过审批？' : '请确认驳回该审批申请。',
       onOk: () => {
         updateApproval(task.id, stage, approved, currentUser.id, approved ? '审核通过' : '审核驳回');
-        setTask(getTaskById(task.id));
         message.success(approved ? '审批已通过' : '已驳回');
       }
     });
@@ -253,7 +288,6 @@ const TaskDetail: React.FC = () => {
       content: '确认已阅读并处理该预警？',
       onOk: () => {
         acknowledgeAlert(task.id, alertId, currentUser.id, '已确认处理');
-        setTask(getTaskById(task.id));
         message.success('预警已确认');
       }
     });
@@ -760,7 +794,7 @@ const TaskDetail: React.FC = () => {
                   <span className="font-medium">{formatNumber(task.geometry.phaseRatio)}</span>
                 </Descriptions.Item>
                 <Descriptions.Item label="目标萃取率">
-                  <span className="font-medium">{formatPercentage(task.system.targetSeparationFactor / 3)}</span>
+                  <span className="font-medium">{formatPercentage(task.system.targetExtractionRate / 100)}</span>
                 </Descriptions.Item>
                 <Descriptions.Item label="网格精度">
                   <Tag color={task.simulationParams.gridPrecision === 'fine' ? 'red' : task.simulationParams.gridPrecision === 'medium' ? 'orange' : 'green'}>
@@ -825,26 +859,217 @@ const TaskDetail: React.FC = () => {
         </span>
       ),
       children: (
-        <div className="flex flex-col items-center justify-center h-96 bg-gray-50 rounded-lg border-2 border-dashed border-gray-300">
-          <BoxPlotOutlined className="text-6xl text-gray-400 mb-4" />
-          <p className="text-lg text-gray-500 font-medium">3D可视化模块加载中</p>
-          <p className="text-sm text-gray-400 mt-2">
-            该模块将展示萃取槽内两相流动、浓度分布的三维可视化效果
-          </p>
-          <div className="mt-4 flex gap-4">
-            <div className="flex items-center gap-2 text-sm text-gray-500">
-              <div className="w-3 h-3 bg-blue-500 rounded-full animate-pulse" />
-              流场展示
+        <div className="space-y-4">
+          <Card size="small" title="视图控制">
+            <div className="flex flex-wrap items-center gap-4">
+              <Segmented
+                value={viewMode}
+                onChange={(value) => setViewMode(value as 'geometry' | 'cloud' | 'combined')}
+                options={[
+                  { label: '几何模型', value: 'geometry', icon: <ApartmentOutlined /> },
+                  { label: '体积云图', value: 'cloud', icon: <AppstoreOutlined /> },
+                  { label: '组合视图', value: 'combined', icon: <ThunderboltOutlined /> }
+                ]}
+              />
+              <Divider type="vertical" className="h-6" />
+              <Space size="middle">
+                <span className="text-sm text-gray-500">显示网格</span>
+                <Switch checked={showGrid} onChange={setShowGrid} size="small" />
+              </Space>
+              <Space size="middle">
+                <span className="text-sm text-gray-500">自动旋转</span>
+                <Switch checked={autoRotate} onChange={setAutoRotate} size="small" />
+              </Space>
+              {viewMode !== 'geometry' && (
+                <>
+                  <Divider type="vertical" className="h-6" />
+                  <Space size="middle">
+                    <span className="text-sm text-gray-500">颜色映射</span>
+                    <Select
+                      value={colormap}
+                      onChange={setColormap}
+                      size="small"
+                      style={{ width: 100 }}
+                      options={[
+                        { label: 'Viridis', value: 'viridis' },
+                        { label: 'Plasma', value: 'plasma' },
+                        { label: 'Rainbow', value: 'rainbow' },
+                        { label: 'Jet', value: 'jet' },
+                        { label: 'Coolwarm', value: 'coolwarm' }
+                      ]}
+                    />
+                  </Space>
+                  <Space size="middle">
+                    <span className="text-sm text-gray-500">渲染模式</span>
+                    <Select
+                      value={renderMode}
+                      onChange={setRenderMode}
+                      size="small"
+                      style={{ width: 100 }}
+                      options={[
+                        { label: '体绘制', value: 'volume' },
+                        { label: '等值面', value: 'isosurface' },
+                        { label: '切片', value: 'slice' }
+                      ]}
+                    />
+                  </Space>
+                </>
+              )}
             </div>
-            <div className="flex items-center gap-2 text-sm text-gray-500">
-              <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse" />
-              浓度云图
+            {viewMode !== 'geometry' && (
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <div className="text-sm text-gray-500 mb-1">不透明度: {(cloudOpacity * 100).toFixed(0)}%</div>
+                  <Slider
+                    min={0.1}
+                    max={1}
+                    step={0.05}
+                    value={cloudOpacity}
+                    onChange={setCloudOpacity}
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-gray-500">显示切片</span>
+                    <Switch checked={showSlice} onChange={setShowSlice} size="small" />
+                  </div>
+                  {showSlice && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <Select
+                        value={sliceAxis}
+                        onChange={setSliceAxis}
+                        size="small"
+                        style={{ width: 60 }}
+                        options={[
+                          { label: 'X', value: 'x' },
+                          { label: 'Y', value: 'y' },
+                          { label: 'Z', value: 'z' }
+                        ]}
+                      />
+                      <Slider
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        value={slicePosition}
+                        onChange={setSlicePosition}
+                        style={{ flex: 1 }}
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </Card>
+
+          {viewMode === 'geometry' && (
+            <div className="w-full" style={{ height: '550px' }}>
+              <MixerSettler3D
+                geometry={task.geometry}
+                simulationResult={task.results}
+                showGrid={showGrid}
+                showAxes={showAxes}
+                autoRotate={autoRotate}
+              />
             </div>
-            <div className="flex items-center gap-2 text-sm text-gray-500">
-              <div className="w-3 h-3 bg-orange-500 rounded-full animate-pulse" />
-              动态演示
+          )}
+
+          {viewMode === 'cloud' && task.results && (
+            <div className="w-full" style={{ height: '550px' }}>
+              <VolumeCloud3D
+                data={{
+                  ...task.results.volumeFractionCloud,
+                  fieldName: '有机相体积分数',
+                  unit: ''
+                }}
+                fieldType="volumeFraction"
+                colormap={colormap}
+                opacity={cloudOpacity}
+                renderMode={renderMode}
+                showSlice={showSlice}
+                sliceAxis={sliceAxis}
+                slicePosition={slicePosition}
+                showAxes={showAxes}
+                showGrid={showGrid}
+                showColorBar={true}
+                cameraPosition={[4, 3, 4]}
+              />
             </div>
-          </div>
+          )}
+
+          {viewMode === 'cloud' && !task.results && (
+            <div className="flex flex-col items-center justify-center h-96 bg-gray-50 rounded-lg">
+              <Empty description="模拟尚未完成，暂无云图数据" />
+            </div>
+          )}
+
+          {viewMode === 'combined' && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div>
+                <div className="text-sm text-gray-500 mb-2 font-medium">几何模型</div>
+                <div className="w-full rounded-lg overflow-hidden" style={{ height: '450px' }}>
+                  <MixerSettler3D
+                    geometry={task.geometry}
+                    simulationResult={task.results}
+                    showGrid={showGrid}
+                    showAxes={showAxes}
+                    autoRotate={autoRotate}
+                  />
+                </div>
+              </div>
+              <div>
+                <div className="text-sm text-gray-500 mb-2 font-medium">体积分数云图</div>
+                {task.results ? (
+                  <div className="w-full rounded-lg overflow-hidden" style={{ height: '450px' }}>
+                    <VolumeCloud3D
+                      data={{
+                        ...task.results.volumeFractionCloud,
+                        fieldName: '有机相体积分数',
+                        unit: ''
+                      }}
+                      fieldType="volumeFraction"
+                      colormap={colormap}
+                      opacity={cloudOpacity}
+                      renderMode={renderMode}
+                      showSlice={showSlice}
+                      sliceAxis={sliceAxis}
+                      slicePosition={slicePosition}
+                      showAxes={showAxes}
+                      showGrid={showGrid}
+                      showColorBar={true}
+                      cameraPosition={[4, 3, 4]}
+                    />
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-96 bg-gray-50 rounded-lg">
+                    <Empty description="暂无云图数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <Card size="small" title="参数说明">
+            <Descriptions column={2} size="small">
+              <Descriptions.Item label="级数">
+                {task.geometry.stages} 级
+              </Descriptions.Item>
+              <Descriptions.Item label="搅拌桨类型">
+                {getImpellerTypeLabel(task.geometry.impellerType)}
+              </Descriptions.Item>
+              <Descriptions.Item label="搅拌转速">
+                {formatNumber(task.geometry.stirringSpeed)} rpm
+              </Descriptions.Item>
+              <Descriptions.Item label="相比">
+                {formatNumber(task.geometry.phaseRatio)}
+              </Descriptions.Item>
+              <Descriptions.Item label="混合室尺寸">
+                {formatNumber(task.geometry.mixerLength)} × {formatNumber(task.geometry.mixerWidth)} × {formatNumber(task.geometry.mixerHeight)} m
+              </Descriptions.Item>
+              <Descriptions.Item label="澄清室尺寸">
+                {formatNumber(task.geometry.settlerLength)} × {formatNumber(task.geometry.settlerWidth)} × {formatNumber(task.geometry.settlerHeight)} m
+              </Descriptions.Item>
+            </Descriptions>
+          </Card>
         </div>
       )
     },
@@ -1191,15 +1416,14 @@ const TaskDetail: React.FC = () => {
 
             {/* 右侧：操作按钮 */}
             <div className="flex items-center gap-2 flex-wrap">
-              <Tooltip title={canStart ? '启动模拟' : '当前状态无法启动'}>
+              <Tooltip title={canStart ? (task?.status === SimulationStatus.PAUSED ? '继续模拟' : task?.status === SimulationStatus.ABNORMAL_ROLLBACK ? '重试模拟' : '启动模拟') : '当前状态无法启动'}>
                 <Button 
                   type="primary" 
                   icon={<PlayCircleOutlined />}
                   onClick={handleStart}
                   disabled={!canStart}
-                  loading={loading && canStart}
                 >
-                  启动
+                  {task?.status === SimulationStatus.PAUSED ? '继续' : task?.status === SimulationStatus.ABNORMAL_ROLLBACK ? '重试' : '启动'}
                 </Button>
               </Tooltip>
               

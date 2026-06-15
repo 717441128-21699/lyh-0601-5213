@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Bell,
   Search,
@@ -18,6 +19,7 @@ import { Alert } from '@/types';
 const { Search: AntSearch } = Input;
 
 const Header: React.FC = () => {
+  const navigate = useNavigate();
   const { currentUser, getUnacknowledgedAlerts, acknowledgeAlert, tasks } = useAppStore();
   const [alertDropdownOpen, setAlertDropdownOpen] = useState(false);
   
@@ -29,6 +31,11 @@ const Header: React.FC = () => {
     if (currentUser) {
       acknowledgeAlert(alert.taskId, alert.id, currentUser.id);
     }
+  };
+
+  const handleAlertClick = (alert: Alert) => {
+    setAlertDropdownOpen(false);
+    navigate(`/tasks/${alert.taskId}`);
   };
 
   const userMenuItems: MenuProps['items'] = [
@@ -55,6 +62,7 @@ const Header: React.FC = () => {
 
   const alertMenuItems: MenuProps['items'] = unacknowledgedAlerts.slice(0, 5).map(alert => ({
     key: alert.id,
+    onClick: () => handleAlertClick(alert),
     label: (
       <div className="py-2">
         <div className="flex items-start gap-3">

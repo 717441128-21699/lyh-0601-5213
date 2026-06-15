@@ -39,6 +39,7 @@ export const mockExtractionSystems: ExtractionSystem[] = [
     extractantRatio: { P507: 1.0, kerosene: 3.0, TBP: 0.5 },
     ph: 3.5,
     targetSeparationFactor: 2.5,
+    targetExtractionRate: 85,
     temperature: 25
   },
   {
@@ -52,6 +53,7 @@ export const mockExtractionSystems: ExtractionSystem[] = [
     extractantRatio: { P507: 1.2, kerosene: 2.8, TBP: 0.3 },
     ph: 4.0,
     targetSeparationFactor: 1.8,
+    targetExtractionRate: 90,
     temperature: 30
   },
   {
@@ -65,6 +67,7 @@ export const mockExtractionSystems: ExtractionSystem[] = [
     extractantRatio: { P204: 1.0, kerosene: 3.5, TBP: 0.4 },
     ph: 3.8,
     targetSeparationFactor: 2.2,
+    targetExtractionRate: 88,
     temperature: 28
   }
 ];

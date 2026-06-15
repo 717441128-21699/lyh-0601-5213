@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Form,
   Input,
@@ -50,7 +50,7 @@ const { TextArea } = Input;
  */
 const NewTask: React.FC = () => {
   const navigate = useNavigate();
-  const { addTask, currentUser } = useAppStore();
+  const { addTask, currentUser, appliedRecommendationParams, clearAppliedRecommendationParams } = useAppStore();
 
   // 当前步骤索引
   const [currentStep, setCurrentStep] = useState(0);
@@ -59,6 +59,42 @@ const NewTask: React.FC = () => {
 
   // 表单实例
   const [form] = Form.useForm();
+
+  /**
+   * 页面加载时检查是否有应用的推荐参数
+   * 如果有，自动填充到表单并提示用户
+   */
+  useEffect(() => {
+    if (appliedRecommendationParams) {
+      const extractantRatioList = Object.entries(appliedRecommendationParams.extractantRatio).map(
+        ([type, value]) => ({ type, value })
+      );
+
+      form.setFieldsValue({
+        feedConcentrations: appliedRecommendationParams.feedConcentrations,
+        extractantRatio: extractantRatioList,
+        ph: appliedRecommendationParams.ph,
+        temperature: appliedRecommendationParams.temperature,
+        targetSeparationFactor: appliedRecommendationParams.targetSeparationFactor,
+        mixerLength: appliedRecommendationParams.mixerLength,
+        mixerWidth: appliedRecommendationParams.mixerWidth,
+        mixerHeight: appliedRecommendationParams.mixerHeight,
+        settlerLength: appliedRecommendationParams.settlerLength,
+        settlerWidth: appliedRecommendationParams.settlerWidth,
+        settlerHeight: appliedRecommendationParams.settlerHeight,
+        impellerType: appliedRecommendationParams.impellerType,
+        impellerDiameter: appliedRecommendationParams.impellerDiameter,
+        stages: appliedRecommendationParams.stages,
+        baffleConfig: appliedRecommendationParams.baffleConfig,
+        stirringSpeed: appliedRecommendationParams.stirringSpeed,
+        phaseRatio: appliedRecommendationParams.phaseRatio
+      });
+
+      message.success('已应用推荐参数，可继续调整后提交');
+
+      clearAppliedRecommendationParams();
+    }
+  }, [appliedRecommendationParams, form, clearAppliedRecommendationParams]);
 
   /**
    * 步骤配置
@@ -162,6 +198,7 @@ const NewTask: React.FC = () => {
         extractantRatio: extractantRatioRecord,
         ph: values.ph,
         targetSeparationFactor: values.targetSeparationFactor,
+        targetExtractionRate: values.targetExtractionRate,
         temperature: values.temperature
       };
 

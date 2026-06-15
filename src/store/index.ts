@@ -9,7 +9,10 @@ import {
   StatisticsData,
   AlertThresholds,
   SimulationStatus,
+  SimulationStatusLabels,
   Alert,
+  AlertType,
+  AlertLevel,
   AdjustmentLog,
   ApprovalRecord,
   MixerSettlerGeometry,
@@ -30,6 +33,14 @@ import {
 } from '../data/mockData';
 import dayjs from 'dayjs';
 
+interface SimulationTimerState {
+  timerId: ReturnType<typeof setTimeout> | null;
+  monitoringTimerId: ReturnType<typeof setInterval> | null;
+  currentStageStartTime: number;
+  pausedRemainingTime: number;
+  isPaused: boolean;
+}
+
 interface AppState {
   tasks: SimulationTask[];
   users: User[];
@@ -45,6 +56,8 @@ interface AppState {
   error: string | null;
   recommendationLoading: boolean;
   systemConfig: SystemConfig;
+  appliedRecommendationParams: (ExtractionSystem & MixerSettlerGeometry) | null;
+  simulationTimers: Record<string, SimulationTimerState>;
   
   setCurrentUser: (userId: string) => void;
   setCurrentTask: (taskId: string | null) => void;
@@ -53,7 +66,7 @@ interface AppState {
   updateTaskStatus: (taskId: string, status: SimulationStatus, details?: string) => void;
   updateTaskProgress: (taskId: string, progress: number) => void;
   updateTaskMonitoringData: (taskId: string, data: Partial<MonitoringData>) => void;
-  addAlert: (taskId: string, alert: Omit<Alert, 'id' | 'taskId' | 'timestamp'>) => void;
+  addAlert: (taskId: string, alert: Omit<Alert, 'id' | 'taskId' | 'timestamp' | 'acknowledged' | 'acknowledgedBy' | 'acknowledgedAt' | 'resolution'>) => void;
   acknowledgeAlert: (taskId: string, alertId: string, userId: string, resolution?: string) => void;
   addAdjustmentLog: (taskId: string, log: Omit<AdjustmentLog, 'id' | 'taskId' | 'timestamp'>) => void;
   updateApproval: (taskId: string, stage: 'stage1' | 'stage2', approved: boolean, userId: string, comments?: string) => void;
@@ -84,7 +97,64 @@ interface AppState {
   getSimilarCases: (elements?: string[]) => SimilarCase[];
   exportRecommendationReport: (recommendationId: string) => void;
   applyRecommendation: (recommendationId: string) => ExtractionSystem & MixerSettlerGeometry;
+  clearAppliedRecommendationParams: () => void;
   updateSystemConfig: (config: Partial<SystemConfig>) => void;
+  startSimulation: (taskId: string) => void;
+  pauseSimulation: (taskId: string) => void;
+  resumeSimulation: (taskId: string) => void;
+  retrySimulation: (taskId: string) => void;
+  cancelSimulation: (taskId: string) => void;
+}
+
+const STATUS_FLOW: SimulationStatus[] = [
+  SimulationStatus.PENDING_VERIFICATION,
+  SimulationStatus.MESHING,
+  SimulationStatus.TWO_PHASE_FLOW,
+  SimulationStatus.MASS_TRANSFER,
+  SimulationStatus.EFFICIENCY_EVALUATION,
+  SimulationStatus.COMPLETED
+];
+
+const STATUS_PROGRESS_MAP: Record<SimulationStatus, number> = {
+  [SimulationStatus.PENDING_VERIFICATION]: 0,
+  [SimulationStatus.MESHING]: 20,
+  [SimulationStatus.TWO_PHASE_FLOW]: 40,
+  [SimulationStatus.MASS_TRANSFER]: 60,
+  [SimulationStatus.EFFICIENCY_EVALUATION]: 80,
+  [SimulationStatus.COMPLETED]: 100,
+  [SimulationStatus.ABNORMAL_ROLLBACK]: 0,
+  [SimulationStatus.PAUSED]: 0,
+  [SimulationStatus.CANCELLED]: 0
+};
+
+function getRandomStageDuration(): number {
+  return 3000 + Math.random() * 2000;
+}
+
+function generateCloudData(x: number, y: number, z: number): any {
+  const data: number[][][] = [];
+  let minValue = Infinity;
+  let maxValue = -Infinity;
+  
+  for (let i = 0; i < x; i++) {
+    data[i] = [];
+    for (let j = 0; j < y; j++) {
+      data[i][j] = [];
+      for (let k = 0; k < z; k++) {
+        const centerX = x / 2;
+        const centerY = y / 2;
+        const distFromCenter = Math.sqrt(Math.pow(i - centerX, 2) + Math.pow(j - centerY, 2));
+        const baseValue = 0.3 + 0.5 * Math.exp(-distFromCenter / (x / 4));
+        const noise = (Math.random() - 0.5) * 0.1;
+        const value = Math.max(0, Math.min(1, baseValue + noise));
+        data[i][j][k] = value;
+        minValue = Math.min(minValue, value);
+        maxValue = Math.max(maxValue, value);
+      }
+    }
+  }
+  
+  return { dimensions: { x, y, z }, data, minValue, maxValue };
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -102,6 +172,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   error: null,
   recommendationLoading: false,
   systemConfig: mockSystemConfig,
+  appliedRecommendationParams: null,
+  simulationTimers: {},
 
   setCurrentUser: (userId: string) => {
     const user = get().users.find(u => u.id === userId);
@@ -187,20 +259,28 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
   },
 
-  addAlert: (taskId: string, alertData) => {
+  addAlert: (taskId: string, alertData: Omit<Alert, 'id' | 'taskId' | 'timestamp'>) => {
     const newAlert: Alert = {
-      ...alertData,
       id: `alert-${Date.now()}`,
       taskId,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      acknowledged: false,
+      ...alertData
     };
-    set(state => ({
-      tasks: state.tasks.map(task => 
+    set(state => {
+      const newTasks = state.tasks.map(task => 
         task.id === taskId 
           ? { ...task, alerts: [...task.alerts, newAlert] }
           : task
-      )
-    }));
+      );
+      const newCurrentTask = state.currentTask?.id === taskId
+        ? newTasks.find(t => t.id === taskId) || null
+        : state.currentTask;
+      return {
+        tasks: newTasks,
+        currentTask: newCurrentTask
+      };
+    });
   },
 
   acknowledgeAlert: (taskId: string, alertId: string, userId: string, resolution?: string) => {
@@ -714,13 +794,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       unit: 'mol/L'
     })) || [];
     
-    return {
+    const appliedParams = {
       id: recommendation.systemId,
       name: `推荐方案-${recommendation.id}`,
       feedConcentrations,
       extractantRatio: recommendation.recommendedExtractantRatio,
       ph: recommendation.recommendedPh,
       targetSeparationFactor: recommendation.predictedSeparationFactor,
+      targetExtractionRate: Math.round(recommendation.predictedStageEfficiency * 100),
       temperature: recommendation.recommendedTemperature,
       mixerLength: 2.0,
       mixerWidth: 1.5,
@@ -735,6 +816,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       stirringSpeed: recommendation.recommendedStirringSpeed,
       phaseRatio: recommendation.recommendedPhaseRatio
     };
+    
+    set({ appliedRecommendationParams: appliedParams });
+    
+    return appliedParams;
+  },
+
+  clearAppliedRecommendationParams: () => {
+    set({ appliedRecommendationParams: null });
   },
 
   updateSystemConfig: (config: Partial<SystemConfig>) => {
@@ -776,5 +865,435 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       }
     }));
+  },
+
+  startSimulation: (taskId: string) => {
+    const state = get();
+    const task = state.tasks.find(t => t.id === taskId);
+    if (!task) return;
+
+    state.cancelSimulation(taskId);
+
+    let startStatus = task.status;
+    let startProgress = task.progress;
+
+    if (task.status === SimulationStatus.ABNORMAL_ROLLBACK) {
+      const historyStatuses = task.statusHistory
+        .filter(h => h.status !== SimulationStatus.ABNORMAL_ROLLBACK && h.status !== SimulationStatus.PAUSED)
+        .map(h => h.status);
+      
+      let prevStatus = SimulationStatus.PENDING_VERIFICATION;
+      for (let i = STATUS_FLOW.length - 1; i >= 0; i--) {
+        if (historyStatuses.includes(STATUS_FLOW[i])) {
+          prevStatus = i > 0 ? STATUS_FLOW[i - 1] : SimulationStatus.PENDING_VERIFICATION;
+          break;
+        }
+      }
+      startStatus = prevStatus;
+      startProgress = STATUS_PROGRESS_MAP[prevStatus];
+      state.updateTaskStatus(taskId, startStatus, '异常回退后重试');
+    } else if (task.status === SimulationStatus.PENDING_VERIFICATION) {
+      state.updateTaskStatus(taskId, SimulationStatus.MESHING, '模拟启动，开始网格划分');
+      startStatus = SimulationStatus.MESHING;
+      startProgress = 20;
+    }
+
+    state.updateTaskProgress(taskId, startProgress);
+
+    const monitoringTimerId = setInterval(() => {
+      const currentTask = get().tasks.find(t => t.id === taskId);
+      if (!currentTask) return;
+
+      const lastTension = currentTask.monitoringData.interfacialTension;
+      const lastTime = lastTension.length > 0 ? lastTension[lastTension.length - 1].time : 0;
+      const newTime = lastTime + 0.1;
+      
+      const newTensionValue = 25 + Math.random() * 5 - 2.5;
+      const newTension = [...lastTension, { time: newTime, value: Math.max(20, Math.min(35, newTensionValue)) }];
+      
+      const newDistributionRatio: Record<string, { time: number; value: number }[]> = {};
+      Object.keys(currentTask.monitoringData.distributionRatio).forEach(el => {
+        const arr = currentTask.monitoringData.distributionRatio[el];
+        const lastVal = arr.length > 0 ? arr[arr.length - 1].value : 1.5;
+        const newVal = lastVal + (Math.random() - 0.5) * 0.1;
+        newDistributionRatio[el] = [...arr, { time: newTime, value: Math.max(0.5, Math.min(3.0, newVal)) }];
+      });
+
+      const lastResidence = currentTask.monitoringData.residenceTimeDistribution;
+      const newResidenceValue = 50 + Math.random() * 20 - 10;
+      const newResidence = [...lastResidence, { time: newTime, value: Math.max(20, Math.min(120, newResidenceValue)) }];
+
+      state.updateTaskMonitoringData(taskId, {
+        interfacialTension: newTension.slice(-100),
+        distributionRatio: newDistributionRatio,
+        residenceTimeDistribution: newResidence.slice(-100)
+      });
+    }, 200);
+
+    const scheduleNextStage = (currentStatus: SimulationStatus) => {
+      const currentIdx = STATUS_FLOW.indexOf(currentStatus);
+      if (currentIdx === -1 || currentIdx >= STATUS_FLOW.length - 1) {
+        clearInterval(monitoringTimerId);
+        set(state => ({
+          simulationTimers: {
+            ...state.simulationTimers,
+            [taskId]: { ...state.simulationTimers[taskId], timerId: null, monitoringTimerId: null }
+          }
+        }));
+        return;
+      }
+
+      const duration = getRandomStageDuration();
+      const startTime = Date.now();
+
+      const timerId = setTimeout(() => {
+        if (Math.random() < 0.1) {
+          clearInterval(monitoringTimerId);
+          state.addAlert(taskId, {
+            type: AlertType.CONVERGENCE_FAILED,
+            level: AlertLevel.DANGER,
+            message: `${SimulationStatusLabels[currentStatus]}阶段计算收敛失败，进入异常回退`,
+            stage: Math.floor(Math.random() * 5) + 1
+          });
+          state.updateTaskStatus(taskId, SimulationStatus.ABNORMAL_ROLLBACK, '模拟计算异常，已自动回退');
+          
+          set(state => ({
+            simulationTimers: {
+              ...state.simulationTimers,
+              [taskId]: { ...state.simulationTimers[taskId], timerId: null, monitoringTimerId: null }
+            }
+          }));
+          return;
+        }
+
+        const nextStatus = STATUS_FLOW[currentIdx + 1];
+        const nextProgress = STATUS_PROGRESS_MAP[nextStatus];
+
+        const detailsMap: Record<SimulationStatus, string> = {
+          [SimulationStatus.PENDING_VERIFICATION]: '参数校验通过',
+          [SimulationStatus.MESHING]: '生成自适应网格，节点数: 125,842',
+          [SimulationStatus.TWO_PHASE_FLOW]: '两相流场模拟计算完成',
+          [SimulationStatus.MASS_TRANSFER]: '传质反应耦合计算完成',
+          [SimulationStatus.EFFICIENCY_EVALUATION]: '级效率评估完成',
+          [SimulationStatus.COMPLETED]: '模拟计算全部完成',
+          [SimulationStatus.ABNORMAL_ROLLBACK]: '',
+          [SimulationStatus.PAUSED]: '',
+          [SimulationStatus.CANCELLED]: ''
+        };
+
+        state.updateTaskStatus(taskId, nextStatus, detailsMap[nextStatus]);
+        state.updateTaskProgress(taskId, nextProgress);
+
+        if (nextStatus === SimulationStatus.COMPLETED) {
+          const currentTask = get().tasks.find(t => t.id === taskId);
+          if (currentTask) {
+            const stages = currentTask.geometry.stages;
+            const stageEfficiency = Array.from({ length: stages }, (_, i) => 0.78 + Math.random() * 0.18);
+            const concentrationDistribution: Record<string, number[]> = {};
+            currentTask.system.feedConcentrations.forEach(fc => {
+              concentrationDistribution[fc.element] = Array.from({ length: stages + 1 }, (_, i) => 
+                fc.concentration * Math.exp(-0.15 * i) * (0.95 + Math.random() * 0.1)
+              );
+            });
+
+            const massTransferMatrix = Array.from({ length: stages }, () =>
+              Array.from({ length: stages }, () => (0.1 + Math.random() * 0.4).toFixed(4))
+            ).map(row => row.map(v => parseFloat(v)));
+
+            const results = {
+              volumeFractionCloud: generateCloudData(20, 15, 10),
+              concentrationAxialDistribution: concentrationDistribution,
+              stageEfficiencyCurve: stageEfficiency,
+              raffinateRatePrediction: Array.from({ length: stages }, (_, i) => 0.05 + 0.9 * Math.exp(-0.2 * (i + 1))),
+              massTransferCoefficientMatrix: massTransferMatrix,
+              materialBalance: { inlet: 1.0, outlet: 0.9987, error: 0.0013 },
+              separationFactor: 2.3 + Math.random() * 0.5,
+              averageExtractionRate: 0.88 + Math.random() * 0.1
+            };
+
+            set(state => ({
+              tasks: state.tasks.map(t => 
+                t.id === taskId ? { ...t, results, updatedAt: new Date().toISOString() } : t
+              )
+            }));
+          }
+
+          clearInterval(monitoringTimerId);
+          set(state => ({
+            simulationTimers: {
+              ...state.simulationTimers,
+              [taskId]: { ...state.simulationTimers[taskId], timerId: null, monitoringTimerId: null }
+            }
+          }));
+          return;
+        }
+
+        scheduleNextStage(nextStatus);
+      }, duration);
+
+      set(state => ({
+        simulationTimers: {
+          ...state.simulationTimers,
+          [taskId]: {
+            ...state.simulationTimers[taskId],
+            timerId,
+            monitoringTimerId,
+            currentStageStartTime: startTime,
+            pausedRemainingTime: 0,
+            isPaused: false
+          }
+        }
+      }));
+    };
+
+    scheduleNextStage(startStatus);
+
+    set(state => ({
+      simulationTimers: {
+        ...state.simulationTimers,
+        [taskId]: {
+          ...state.simulationTimers[taskId],
+          monitoringTimerId,
+          currentStageStartTime: Date.now(),
+          pausedRemainingTime: 0,
+          isPaused: false
+        }
+      }
+    }));
+  },
+
+  pauseSimulation: (taskId: string) => {
+    const state = get();
+    const timerState = state.simulationTimers[taskId];
+    if (!timerState || timerState.isPaused) return;
+
+    if (timerState.timerId) {
+      clearTimeout(timerState.timerId);
+    }
+    if (timerState.monitoringTimerId) {
+      clearInterval(timerState.monitoringTimerId);
+    }
+    
+    const elapsed = Date.now() - timerState.currentStageStartTime;
+    const remaining = Math.max(0, 5000 - elapsed);
+    
+    state.updateTaskStatus(taskId, SimulationStatus.PAUSED, '用户暂停模拟');
+
+    set(state => ({
+      simulationTimers: {
+        ...state.simulationTimers,
+        [taskId]: {
+          ...state.simulationTimers[taskId],
+          timerId: null,
+          monitoringTimerId: null,
+          pausedRemainingTime: remaining,
+          isPaused: true
+        }
+      }
+    }));
+  },
+
+  resumeSimulation: (taskId: string) => {
+    const state = get();
+    const timerState = state.simulationTimers[taskId];
+    const task = state.tasks.find(t => t.id === taskId);
+    
+    if (!timerState || !timerState.isPaused || !task) return;
+
+    const currentStatus = task.status;
+    const historyStatuses = task.statusHistory
+      .filter(h => h.status !== SimulationStatus.PAUSED && h.status !== SimulationStatus.ABNORMAL_ROLLBACK)
+      .map(h => h.status);
+    
+    let actualStatus = SimulationStatus.MESHING;
+    for (let i = STATUS_FLOW.length - 1; i >= 0; i--) {
+      if (historyStatuses.includes(STATUS_FLOW[i])) {
+        actualStatus = STATUS_FLOW[i];
+        break;
+      }
+    }
+
+    state.updateTaskStatus(taskId, actualStatus, '用户继续模拟');
+
+    const remainingTime = timerState.pausedRemainingTime > 0 ? timerState.pausedRemainingTime : getRandomStageDuration();
+    const startTime = Date.now();
+
+    const monitoringTimerId = setInterval(() => {
+      const currentTask = get().tasks.find(t => t.id === taskId);
+      if (!currentTask) return;
+
+      const lastTension = currentTask.monitoringData.interfacialTension;
+      const lastTime = lastTension.length > 0 ? lastTension[lastTension.length - 1].time : 0;
+      const newTime = lastTime + 0.1;
+      
+      const newTensionValue = 25 + Math.random() * 5 - 2.5;
+      const newTension = [...lastTension, { time: newTime, value: Math.max(20, Math.min(35, newTensionValue)) }];
+      
+      const newDistributionRatio: Record<string, { time: number; value: number }[]> = {};
+      Object.keys(currentTask.monitoringData.distributionRatio).forEach(el => {
+        const arr = currentTask.monitoringData.distributionRatio[el];
+        const lastVal = arr.length > 0 ? arr[arr.length - 1].value : 1.5;
+        const newVal = lastVal + (Math.random() - 0.5) * 0.1;
+        newDistributionRatio[el] = [...arr, { time: newTime, value: Math.max(0.5, Math.min(3.0, newVal)) }];
+      });
+
+      const lastResidence = currentTask.monitoringData.residenceTimeDistribution;
+      const newResidenceValue = 50 + Math.random() * 20 - 10;
+      const newResidence = [...lastResidence, { time: newTime, value: Math.max(20, Math.min(120, newResidenceValue)) }];
+
+      state.updateTaskMonitoringData(taskId, {
+        interfacialTension: newTension.slice(-100),
+        distributionRatio: newDistributionRatio,
+        residenceTimeDistribution: newResidence.slice(-100)
+      });
+    }, 200);
+
+    const timerId = setTimeout(() => {
+      const currentIdx = STATUS_FLOW.indexOf(actualStatus);
+      if (currentIdx === -1 || currentIdx >= STATUS_FLOW.length - 1) {
+        clearInterval(monitoringTimerId);
+        return;
+      }
+
+      const nextStatus = STATUS_FLOW[currentIdx + 1];
+      const nextProgress = STATUS_PROGRESS_MAP[nextStatus];
+
+      const detailsMap: Record<SimulationStatus, string> = {
+        [SimulationStatus.PENDING_VERIFICATION]: '参数校验通过',
+        [SimulationStatus.MESHING]: '生成自适应网格，节点数: 125,842',
+        [SimulationStatus.TWO_PHASE_FLOW]: '两相流场模拟计算完成',
+        [SimulationStatus.MASS_TRANSFER]: '传质反应耦合计算完成',
+        [SimulationStatus.EFFICIENCY_EVALUATION]: '级效率评估完成',
+        [SimulationStatus.COMPLETED]: '模拟计算全部完成',
+        [SimulationStatus.ABNORMAL_ROLLBACK]: '',
+        [SimulationStatus.PAUSED]: '',
+        [SimulationStatus.CANCELLED]: ''
+      };
+
+      state.updateTaskStatus(taskId, nextStatus, detailsMap[nextStatus]);
+      state.updateTaskProgress(taskId, nextProgress);
+
+      if (nextStatus === SimulationStatus.COMPLETED) {
+        const currentTask = get().tasks.find(t => t.id === taskId);
+        if (currentTask) {
+          const stages = currentTask.geometry.stages;
+          const stageEfficiency = Array.from({ length: stages }, (_, i) => 0.78 + Math.random() * 0.18);
+          const concentrationDistribution: Record<string, number[]> = {};
+          currentTask.system.feedConcentrations.forEach(fc => {
+            concentrationDistribution[fc.element] = Array.from({ length: stages + 1 }, (_, i) => 
+              fc.concentration * Math.exp(-0.15 * i) * (0.95 + Math.random() * 0.1)
+            );
+          });
+
+          const massTransferMatrix = Array.from({ length: stages }, () =>
+            Array.from({ length: stages }, () => (0.1 + Math.random() * 0.4).toFixed(4))
+          ).map(row => row.map(v => parseFloat(v)));
+
+          const results = {
+            volumeFractionCloud: generateCloudData(20, 15, 10),
+            concentrationAxialDistribution: concentrationDistribution,
+            stageEfficiencyCurve: stageEfficiency,
+            raffinateRatePrediction: Array.from({ length: stages }, (_, i) => 0.05 + 0.9 * Math.exp(-0.2 * (i + 1))),
+            massTransferCoefficientMatrix: massTransferMatrix,
+            materialBalance: { inlet: 1.0, outlet: 0.9987, error: 0.0013 },
+            separationFactor: 2.3 + Math.random() * 0.5,
+            averageExtractionRate: 0.88 + Math.random() * 0.1
+          };
+
+          set(state => ({
+            tasks: state.tasks.map(t => 
+              t.id === taskId ? { ...t, results, updatedAt: new Date().toISOString() } : t
+            )
+          }));
+        }
+
+        clearInterval(monitoringTimerId);
+        set(state => ({
+          simulationTimers: {
+            ...state.simulationTimers,
+            [taskId]: { ...state.simulationTimers[taskId], timerId: null, monitoringTimerId: null }
+          }
+        }));
+        return;
+      }
+
+      const scheduleNextStage = (status: SimulationStatus) => {
+        const idx = STATUS_FLOW.indexOf(status);
+        if (idx === -1 || idx >= STATUS_FLOW.length - 1) return;
+
+        const duration = getRandomStageDuration();
+        const stageStartTime = Date.now();
+
+        const tId = setTimeout(() => {
+          const ns = STATUS_FLOW[idx + 1];
+          const np = STATUS_PROGRESS_MAP[ns];
+          state.updateTaskStatus(taskId, ns, detailsMap[ns] || '');
+          state.updateTaskProgress(taskId, np);
+
+          if (ns === SimulationStatus.COMPLETED) {
+            clearInterval(monitoringTimerId);
+            set(state => ({
+              simulationTimers: {
+                ...state.simulationTimers,
+                [taskId]: { ...state.simulationTimers[taskId], timerId: null, monitoringTimerId: null }
+              }
+            }));
+            return;
+          }
+
+          scheduleNextStage(ns);
+        }, duration);
+
+        set(state => ({
+          simulationTimers: {
+            ...state.simulationTimers,
+            [taskId]: {
+              ...state.simulationTimers[taskId],
+              timerId: tId,
+              currentStageStartTime: stageStartTime
+            }
+          }
+        }));
+      };
+
+      scheduleNextStage(nextStatus);
+    }, remainingTime);
+
+    set(state => ({
+      simulationTimers: {
+        ...state.simulationTimers,
+        [taskId]: {
+          ...state.simulationTimers[taskId],
+          timerId,
+          monitoringTimerId,
+          currentStageStartTime: startTime,
+          isPaused: false
+        }
+      }
+    }));
+  },
+
+  retrySimulation: (taskId: string) => {
+    get().startSimulation(taskId);
+  },
+
+  cancelSimulation: (taskId: string) => {
+    const state = get();
+    const timerState = state.simulationTimers[taskId];
+    
+    if (timerState) {
+      if (timerState.timerId) {
+        clearTimeout(timerState.timerId);
+      }
+      if (timerState.monitoringTimerId) {
+        clearInterval(timerState.monitoringTimerId);
+      }
+    }
+
+    set(state => {
+      const newTimers = { ...state.simulationTimers };
+      delete newTimers[taskId];
+      return { simulationTimers: newTimers };
+    });
   }
 }));

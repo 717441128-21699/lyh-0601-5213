@@ -110,6 +110,7 @@ export interface ExtractionSystem {
   extractantRatio: Record<string, number>;
   ph: number;
   targetSeparationFactor: number;
+  targetExtractionRate: number;
   temperature: number;
   isPaused?: boolean;
   pauseReason?: string;

@@ -146,14 +146,9 @@ const Recommendation: React.FC = () => {
     }
 
     try {
-      const appliedParams = applyRecommendation(selectedRecommendation.id);
+      applyRecommendation(selectedRecommendation.id);
       message.success('推荐参数已应用，正在跳转到新建任务页面...');
-
-      navigate('/tasks/new', {
-        state: {
-          prefillData: appliedParams
-        }
-      });
+      navigate('/tasks/new');
     } catch (error) {
       message.error('应用推荐参数失败');
     }
